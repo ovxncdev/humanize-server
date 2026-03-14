@@ -1,6 +1,5 @@
 FROM node:20-slim
 
-# Install Chrome dependencies
 RUN apt-get update && apt-get install -y \
     chromium \
     chromium-sandbox \
