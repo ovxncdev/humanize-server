@@ -1,17 +1,19 @@
 {
-  "name": "humanize-test",
+  "name": "humanize-server",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Humanize AI Pro automation server",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js",
+    "dev": "node server.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "puppeteer": "^24.39.1",
+    "express": "^4.18.2",
+    "puppeteer": "^24.3.1",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2"
   }
