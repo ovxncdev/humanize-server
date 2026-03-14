@@ -57,8 +57,8 @@ function generateSessionId() {
 async function initBrowser() {
   console.log('[Browser] Launching...');
   browser = await puppeteer.launch({
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
     headless: true,
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -67,8 +67,38 @@ async function initBrowser() {
       '--no-first-run',
       '--no-zygote',
       '--single-process',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-default-apps',
+      '--disable-sync',
+      '--disable-translate',
+      '--hide-scrollbars',
+      '--metrics-recording-only',
+      '--mute-audio',
+      '--safebrowsing-disable-auto-update',
+      '--js-flags=--max-old-space-size=256',
+      '--memory-pressure-off',
+      '--disable-features=TranslateUI',
     ],
   });
+
+  // Restart if browser crashes
+  browser.on('disconnected', async () => {
+    console.warn('[Browser] Disconnected — restarting in 3s...');
+    isReady = false;
+    isLoggedIn = false;
+    setTimeout(async () => {
+      try {
+        await initBrowser();
+        await login();
+        isReady = true;
+        console.log('[Browser] Restarted ✅');
+      } catch (e) {
+        console.error('[Browser] Restart failed:', e.message);
+      }
+    }, 3000);
+  });
+
   page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 800 });
   await page.setUserAgent(
@@ -264,6 +294,22 @@ app.post('/humanize', async (req, res) => {
 app.listen(PORT, async () => {
   console.log(`[Server] Port ${PORT}`);
   await startup();
+
+  // Keep-alive ping every 4 minutes to prevent Railway from sleeping
+  setInterval(() => {
+    fetch(`http://localhost:${PORT}/health`)
+      .then(() => console.log('[KeepAlive] ping ok'))
+      .catch(e => console.warn('[KeepAlive] ping failed:', e.message));
+  }, 4 * 60 * 1000);
+});
+
+// Log uncaught errors instead of silent crash
+process.on('uncaughtException', (err) => {
+  console.error('[UNCAUGHT]', err.message, err.stack);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[UNHANDLED REJECTION]', reason);
 });
 
 process.on('SIGTERM', async () => {

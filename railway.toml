@@ -4,3 +4,7 @@ builder = "dockerfile"
 [deploy]
 startCommand = "node server.js"
 restartPolicyType = "always"
+restartPolicyMaxRetries = 10
+
+[[services]]
+memory = 512
