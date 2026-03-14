@@ -1,7 +1,13 @@
-// server.js — Direct API approach (no UI automation needed)
-// Replicates the exact HTTP request humanizeai.pro makes internally
+// server.js
+// Humanize AI Pro — Express + Puppeteer server
+// Logs in once on startup, keeps session alive, chunks text ≤198 words
 
 const express = require('express');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+
+puppeteer.use(StealthPlugin());
+
 const app = express();
 app.use(express.json());
 
@@ -9,14 +15,16 @@ const PORT = process.env.PORT || 3000;
 const EMAIL = process.env.HUMANIZE_EMAIL;
 const PASSWORD = process.env.HUMANIZE_PASSWORD;
 
-let sessionCookies = null;
+let browser = null;
+let page = null;
+let isLoggedIn = false;
 let isReady = false;
 
 // ============================================
 // CHUNK TEXT INTO ≤198 WORD PIECES
 // ============================================
 
-function chunkText(text, maxWords = 190) {
+function chunkText(text, maxWords = 198) {
   const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
   const chunks = [];
   let current = [];
@@ -32,6 +40,7 @@ function chunkText(text, maxWords = 190) {
     current.push(sentence.trim());
     count += words.length;
   }
+
   if (current.length > 0) chunks.push(current.join(' ').trim());
   return chunks;
 }
@@ -42,94 +51,180 @@ function generateSessionId() {
 }
 
 // ============================================
-// LOGIN — get session cookies
+// INIT BROWSER
 // ============================================
 
-async function login() {
-  console.log('[Login] Logging in...');
-
-  const res = await fetch('https://www.humanizeai.pro/api/login', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Origin': 'https://www.humanizeai.pro',
-      'Referer': 'https://www.humanizeai.pro/login',
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    },
-    body: JSON.stringify({ email: EMAIL, password: PASSWORD }),
+async function initBrowser() {
+  console.log('[Browser] Launching...');
+  browser = await puppeteer.launch({
+    headless: true,
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--no-first-run',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-default-apps',
+      '--disable-sync',
+      '--disable-translate',
+      '--hide-scrollbars',
+      '--mute-audio',
+      '--disable-features=TranslateUI,VizDisplayCompositor',
+      '--shm-size=256mb',
+    ],
   });
 
-  console.log('[Login] Status:', res.status);
+  // Restart if browser crashes
+  browser.on('disconnected', async () => {
+    console.warn('[Browser] Disconnected — restarting in 3s...');
+    isReady = false;
+    isLoggedIn = false;
+    setTimeout(async () => {
+      try {
+        await initBrowser();
+        await login();
+        isReady = true;
+        console.log('[Browser] Restarted ✅');
+      } catch (e) {
+        console.error('[Browser] Restart failed:', e.message);
+      }
+    }, 3000);
+  });
 
-  // Grab cookies from response
-  const setCookie = res.headers.getSetCookie?.() || [];
-  if (setCookie.length > 0) {
-    sessionCookies = setCookie.map(c => c.split(';')[0]).join('; ');
-    console.log('[Login] Got cookies:', sessionCookies.substring(0, 50) + '...');
-  }
-
-  const data = await res.json().catch(() => ({}));
-  console.log('[Login] Response:', JSON.stringify(data).substring(0, 200));
-
-  if (!res.ok && !sessionCookies) {
-    throw new Error(`Login failed: ${res.status} ${JSON.stringify(data)}`);
-  }
-
-  console.log('[Login] Success ✅');
+  page = await browser.newPage();
+  await page.setViewport({ width: 1280, height: 800 });
+  await page.setUserAgent(
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+  );
+  console.log('[Browser] Launched');
 }
 
 // ============================================
-// HUMANIZE A SINGLE CHUNK — direct API call
+// LOGIN
+// ============================================
+
+async function login() {
+  console.log('[Login] Navigating to login page...');
+  await page.goto('https://www.humanizeai.pro/login', {
+    waitUntil: 'networkidle2',
+    timeout: 30000,
+  });
+  await new Promise(r => setTimeout(r, 2000));
+
+  await page.waitForSelector('input[type="email"], input[name="email"]', { timeout: 10000 });
+  await page.type('input[type="email"], input[name="email"]', EMAIL, { delay: 50 });
+
+  await page.waitForSelector('input[type="password"]', { timeout: 5000 });
+  await page.type('input[type="password"]', PASSWORD, { delay: 50 });
+
+  const loginBtn = await page.evaluateHandle(() => {
+    const buttons = Array.from(document.querySelectorAll('button'));
+    return buttons.find(b =>
+      b.textContent.toLowerCase().includes('log in') ||
+      b.textContent.toLowerCase().includes('sign in') ||
+      b.type === 'submit'
+    );
+  });
+
+  const el = loginBtn.asElement();
+  if (el) await el.click();
+  else throw new Error('Login button not found');
+
+  await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
+  await new Promise(r => setTimeout(r, 2000));
+
+  const url = page.url();
+  if (url.includes('login')) throw new Error('Login failed — check credentials');
+
+  isLoggedIn = true;
+  console.log('[Login] Success. URL:', url);
+}
+
+// ============================================
+// HUMANIZE A SINGLE CHUNK
 // ============================================
 
 async function humanizeChunk(text) {
-  console.log(`[Humanize] ${text.split(/\s+/).length} words`);
+  console.log(`[Humanize] Chunk: ${text.split(/\s+/).length} words`);
 
-  const body = {
-    text,
-    alg: 0,
-    isLogged: true,
-    isSample: false,
-    keywords: [],
-    sessionId: generateSessionId(),
-    style: 'free',
-    test_allultra: null,
-    test_limitNot: null,
-    trialNumber: 0,
-    ultra: 0,
-  };
+  // Always navigate to home to ensure clean state
+  console.log('[Humanize] Navigating to humanizeai.pro...');
+  await page.goto('https://www.humanizeai.pro', { waitUntil: 'networkidle2', timeout: 30000 });
+  await new Promise(r => setTimeout(r, 2000));
+  console.log('[Humanize] Current URL:', page.url());
 
-  const headers = {
-    'Content-Type': 'application/json',
-    'Accept': '*/*',
-    'Origin': 'https://www.humanizeai.pro',
-    'Referer': 'https://www.humanizeai.pro/',
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  };
+  return new Promise(async (resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Timeout: no response in 60s')), 60000);
 
-  if (sessionCookies) {
-    headers['Cookie'] = sessionCookies;
-  }
-
-  const res = await fetch('https://www.humanizeai.pro/api/process', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(30000),
-  });
-
-  console.log('[Humanize] Status:', res.status);
-  const data = await res.json();
-  console.log('[Humanize] Response:', JSON.stringify(data).substring(0, 300));
-
-  if (data?.result?.[0]?.text) {
-    return {
-      text: data.result[0].text,
-      score: data.result[0].scores?.average ?? null,
+    const responseHandler = async (response) => {
+      const url = response.url();
+      if (url.includes('/api/')) {
+        console.log('[Humanize] API call detected:', url, response.status());
+      }
+      if (url.includes('/api/process')) {
+        try {
+          const json = await response.json();
+          console.log('[Humanize] /api/process response:', JSON.stringify(json).substring(0, 200));
+          if (json?.result?.[0]?.text) {
+            clearTimeout(timeout);
+            page.off('response', responseHandler);
+            resolve({
+              text: json.result[0].text,
+              score: json.result[0].scores?.average ?? null,
+            });
+          }
+        } catch (e) {
+          console.log('[Humanize] Failed to parse /api/process response:', e.message);
+        }
+      }
     };
-  }
 
-  throw new Error('No result in response: ' + JSON.stringify(data).substring(0, 200));
+    page.on('response', responseHandler);
+
+    try {
+      await page.waitForSelector('textarea', { timeout: 10000 });
+      console.log('[Humanize] Textarea found');
+      await new Promise(r => setTimeout(r, 500));
+
+      await page.evaluate((t) => {
+        const textarea = document.querySelector('textarea');
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(textarea, t);
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        textarea.dispatchEvent(new Event('change', { bubbles: true }));
+      }, text);
+
+      await new Promise(r => setTimeout(r, 1500));
+
+      // Log all buttons on page
+      const buttons = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll('button')).map(b => b.textContent.trim());
+      });
+      console.log('[Humanize] Buttons on page:', JSON.stringify(buttons));
+
+      const btnHandle = await page.evaluateHandle(() => {
+        const buttons = Array.from(document.querySelectorAll('button'));
+        return buttons.find(b => b.textContent.trim() === 'Humanize AI');
+      });
+
+      const box = await btnHandle.asElement()?.boundingBox();
+      if (box) {
+        console.log('[Humanize] Clicking Humanize AI button at', JSON.stringify(box));
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      } else {
+        clearTimeout(timeout);
+        page.off('response', responseHandler);
+        reject(new Error('Humanize AI button not found'));
+      }
+    } catch (err) {
+      clearTimeout(timeout);
+      page.off('response', responseHandler);
+      reject(err);
+    }
+  });
 }
 
 // ============================================
@@ -138,32 +233,22 @@ async function humanizeChunk(text) {
 
 async function startup() {
   try {
+    await initBrowser();
     await login();
     isReady = true;
     console.log('[Server] Ready ✅');
   } catch (err) {
     console.error('[Startup] Failed:', err.message);
-    // Retry after 5s
-    setTimeout(startup, 5000);
+    process.exit(1);
   }
 }
-
-// Re-login every 30 minutes to keep session fresh
-setInterval(async () => {
-  try {
-    await login();
-    console.log('[Session] Refreshed');
-  } catch (e) {
-    console.warn('[Session] Refresh failed:', e.message);
-  }
-}, 30 * 60 * 1000);
 
 // ============================================
 // ROUTES
 // ============================================
 
 app.get('/health', (req, res) => {
-  res.json({ status: isReady ? 'ready' : 'starting', hasCookies: !!sessionCookies });
+  res.json({ status: isReady ? 'ready' : 'starting', loggedIn: isLoggedIn });
 });
 
 app.post('/humanize', async (req, res) => {
@@ -180,7 +265,7 @@ app.post('/humanize', async (req, res) => {
   console.log(`[POST /humanize] ${wordCount} words`);
 
   try {
-    const chunks = chunkText(text, 190);
+    const chunks = chunkText(text, 198);
     console.log(`[POST /humanize] ${chunks.length} chunk(s)`);
 
     const results = [];
@@ -191,8 +276,11 @@ app.post('/humanize', async (req, res) => {
       console.log(`[POST /humanize] Chunk ${i + 1}/${chunks.length}`);
       const result = await humanizeChunk(chunks[i]);
       results.push(result.text);
-      if (result.score !== null) { totalScore += result.score; scoredChunks++; }
-      if (i < chunks.length - 1) await new Promise(r => setTimeout(r, 1500));
+      if (result.score !== null) {
+        totalScore += result.score;
+        scoredChunks++;
+      }
+      if (i < chunks.length - 1) await new Promise(r => setTimeout(r, 2000));
     }
 
     res.json({
@@ -213,11 +301,31 @@ app.post('/humanize', async (req, res) => {
 // START
 // ============================================
 
-app.listen(PORT, '0.0.0.0', async () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`[Server] Port ${PORT}`);
-  await startup();
+  // Start browser + login in background — server accepts requests immediately
+  startup().catch(err => {
+    console.error('[Startup] Fatal:', err.message);
+  });
+
+  // Keep-alive ping every 4 minutes
+  setInterval(() => {
+    fetch(`http://localhost:${PORT}/health`)
+      .then(() => console.log('[KeepAlive] ok'))
+      .catch(e => console.warn('[KeepAlive] failed:', e.message));
+  }, 4 * 60 * 1000);
 });
 
-process.on('uncaughtException', (err) => console.error('[UNCAUGHT]', err.message));
-process.on('unhandledRejection', (reason) => console.error('[UNHANDLED]', reason));
-process.on('SIGTERM', () => process.exit(0));
+// Log uncaught errors instead of silent crash
+process.on('uncaughtException', (err) => {
+  console.error('[UNCAUGHT]', err.message, err.stack);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[UNHANDLED REJECTION]', reason);
+});
+
+process.on('SIGTERM', async () => {
+  if (browser) await browser.close();
+  process.exit(0);
+});
