@@ -291,7 +291,7 @@ app.post('/humanize', async (req, res) => {
 // START
 // ============================================
 
-app.listen(PORT, async () => {
+app.listen(PORT, '0.0.0.0', async () => {
   console.log(`[Server] Port ${PORT}`);
   await startup();
 
