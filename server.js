@@ -77,8 +77,9 @@ async function getBrowser() {
     });
   }
   if (!BROWSERLESS_TOKEN) throw new Error('BROWSERLESS_TOKEN not set');
-  return puppeteer.connect({
-    browserWSEndpoint: `wss://production-sfo.browserless.io/?token=${BROWSERLESS_TOKEN}&timeout=120000`,
+  const puppeteerCore = require('puppeteer-core');
+  return puppeteerCore.connect({
+    browserWSEndpoint: `wss://production-sfo.browserless.io/?token=${BROWSERLESS_TOKEN}`,
   });
 }
 
@@ -265,19 +266,6 @@ app.get('/health', (req, res) => res.json({
   busy: isBusy,
   queued: queue.length,
 }));
-
-app.get('/debug-token', (req, res) => {
-  const token = process.env.BROWSERLESS_TOKEN || 'NOT SET';
-  res.json({
-    length: token.length,
-    first10: token.substring(0, 10),
-    last10: token.substring(token.length - 10),
-    hasNewline: token.includes('\n'),
-    hasSpace: token.includes(' '),
-    raw: JSON.stringify(token), // shows hidden characters
-  });
-});
-
 
 app.post('/humanize', (req, res) => {
   const { text } = req.body;
