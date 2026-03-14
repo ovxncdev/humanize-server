@@ -78,7 +78,7 @@ async function getBrowser() {
   }
   if (!BROWSERLESS_TOKEN) throw new Error('BROWSERLESS_TOKEN not set');
   return puppeteer.connect({
-    browserWSEndpoint: `wss://production-sfo.browserless.io?token=${BROWSERLESS_TOKEN}&timeout=120000&stealth=true`,
+    browserWSEndpoint: `wss://production-sfo.browserless.io/?token=${BROWSERLESS_TOKEN}&timeout=120000`,
   });
 }
 
