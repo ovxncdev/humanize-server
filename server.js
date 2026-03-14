@@ -92,6 +92,10 @@ async function initBrowser() {
       '--single-process',
       '--disable-features=TranslateUI,VizDisplayCompositor',
       '--memory-pressure-off',
+      '--disable-web-security',
+      '--ignore-certificate-errors',
+      '--dns-prefetch-disable',
+      '--aggressive-cache-discard',
     ],
   });
 
@@ -126,14 +130,15 @@ async function initBrowser() {
 async function login() {
   if (!EMAIL || !PASSWORD) {
     console.warn('[Login] No credentials — using free tier');
-    await page.goto('https://www.humanizeai.pro', { waitUntil: 'networkidle2', timeout: 30000 });
+    await page.goto('https://www.humanizeai.pro', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await new Promise(r => setTimeout(r, 3000));
     isLoggedIn = false;
     return;
   }
 
   console.log('[Login] Logging in...');
-  await page.goto('https://www.humanizeai.pro/login', { waitUntil: 'networkidle2', timeout: 30000 });
-  await new Promise(r => setTimeout(r, 2000));
+  await page.goto('https://www.humanizeai.pro/login', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await new Promise(r => setTimeout(r, 3000));
 
   await page.waitForSelector('input[type="email"], input[name="email"]', { timeout: 10000 });
   await page.type('input[type="email"], input[name="email"]', EMAIL, { delay: 50 });
@@ -169,8 +174,8 @@ async function login() {
 async function humanizeChunk(text) {
   console.log('[Humanize] words:', text.split(/\s+/).length);
 
-  await page.goto('https://www.humanizeai.pro', { waitUntil: 'networkidle2', timeout: 30000 });
-  await new Promise(r => setTimeout(r, 2000));
+  await page.goto('https://www.humanizeai.pro', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await new Promise(r => setTimeout(r, 3000));
 
   // Dismiss cookie banner
   try {
@@ -319,6 +324,18 @@ app.get('/health', (req, res) => res.json({
   busy: isBusy,
   queued: queue.length,
 }));
+
+// Debug: test if Railway can reach humanizeai.pro
+app.get('/test-nav', async (req, res) => {
+  try {
+    await page.goto('https://www.humanizeai.pro', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    const url = page.url();
+    const title = await page.title();
+    res.json({ success: true, url, title });
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
+});
 
 // Submit — returns jobId immediately
 app.post('/humanize', (req, res) => {
