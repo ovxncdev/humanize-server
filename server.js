@@ -65,20 +65,15 @@ async function initBrowser() {
       '--disable-dev-shm-usage',
       '--disable-gpu',
       '--no-first-run',
-      '--no-zygote',
-      '--single-process',
       '--disable-extensions',
       '--disable-background-networking',
       '--disable-default-apps',
       '--disable-sync',
       '--disable-translate',
       '--hide-scrollbars',
-      '--metrics-recording-only',
       '--mute-audio',
-      '--safebrowsing-disable-auto-update',
-      '--js-flags=--max-old-space-size=256',
-      '--memory-pressure-off',
-      '--disable-features=TranslateUI',
+      '--disable-features=TranslateUI,VizDisplayCompositor',
+      '--shm-size=256mb',
     ],
   });
 
@@ -155,19 +150,24 @@ async function login() {
 async function humanizeChunk(text) {
   console.log(`[Humanize] Chunk: ${text.split(/\s+/).length} words`);
 
-  const currentUrl = page.url();
-  if (!currentUrl.includes('humanizeai.pro') || currentUrl.includes('login')) {
-    await page.goto('https://www.humanizeai.pro', { waitUntil: 'networkidle2', timeout: 30000 });
-    await new Promise(r => setTimeout(r, 2000));
-  }
+  // Always navigate to home to ensure clean state
+  console.log('[Humanize] Navigating to humanizeai.pro...');
+  await page.goto('https://www.humanizeai.pro', { waitUntil: 'networkidle2', timeout: 30000 });
+  await new Promise(r => setTimeout(r, 2000));
+  console.log('[Humanize] Current URL:', page.url());
 
   return new Promise(async (resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('Timeout: no response in 30s')), 30000);
+    const timeout = setTimeout(() => reject(new Error('Timeout: no response in 60s')), 60000);
 
     const responseHandler = async (response) => {
-      if (response.url().includes('/api/process')) {
+      const url = response.url();
+      if (url.includes('/api/')) {
+        console.log('[Humanize] API call detected:', url, response.status());
+      }
+      if (url.includes('/api/process')) {
         try {
           const json = await response.json();
+          console.log('[Humanize] /api/process response:', JSON.stringify(json).substring(0, 200));
           if (json?.result?.[0]?.text) {
             clearTimeout(timeout);
             page.off('response', responseHandler);
@@ -176,7 +176,9 @@ async function humanizeChunk(text) {
               score: json.result[0].scores?.average ?? null,
             });
           }
-        } catch (e) {}
+        } catch (e) {
+          console.log('[Humanize] Failed to parse /api/process response:', e.message);
+        }
       }
     };
 
@@ -184,6 +186,7 @@ async function humanizeChunk(text) {
 
     try {
       await page.waitForSelector('textarea', { timeout: 10000 });
+      console.log('[Humanize] Textarea found');
       await new Promise(r => setTimeout(r, 500));
 
       await page.evaluate((t) => {
@@ -196,6 +199,12 @@ async function humanizeChunk(text) {
 
       await new Promise(r => setTimeout(r, 1500));
 
+      // Log all buttons on page
+      const buttons = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll('button')).map(b => b.textContent.trim());
+      });
+      console.log('[Humanize] Buttons on page:', JSON.stringify(buttons));
+
       const btnHandle = await page.evaluateHandle(() => {
         const buttons = Array.from(document.querySelectorAll('button'));
         return buttons.find(b => b.textContent.trim() === 'Humanize AI');
@@ -203,6 +212,7 @@ async function humanizeChunk(text) {
 
       const box = await btnHandle.asElement()?.boundingBox();
       if (box) {
+        console.log('[Humanize] Clicking Humanize AI button at', JSON.stringify(box));
         await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
       } else {
         clearTimeout(timeout);
@@ -291,15 +301,18 @@ app.post('/humanize', async (req, res) => {
 // START
 // ============================================
 
-app.listen(PORT, '0.0.0.0', async () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`[Server] Port ${PORT}`);
-  await startup();
+  // Start browser + login in background — server accepts requests immediately
+  startup().catch(err => {
+    console.error('[Startup] Fatal:', err.message);
+  });
 
-  // Keep-alive ping every 4 minutes to prevent Railway from sleeping
+  // Keep-alive ping every 4 minutes
   setInterval(() => {
     fetch(`http://localhost:${PORT}/health`)
-      .then(() => console.log('[KeepAlive] ping ok'))
-      .catch(e => console.warn('[KeepAlive] ping failed:', e.message));
+      .then(() => console.log('[KeepAlive] ok'))
+      .catch(e => console.warn('[KeepAlive] failed:', e.message));
   }, 4 * 60 * 1000);
 });
 
