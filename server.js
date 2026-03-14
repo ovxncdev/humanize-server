@@ -266,6 +266,19 @@ app.get('/health', (req, res) => res.json({
   queued: queue.length,
 }));
 
+app.get('/debug-token', (req, res) => {
+  const token = process.env.BROWSERLESS_TOKEN || 'NOT SET';
+  res.json({
+    length: token.length,
+    first10: token.substring(0, 10),
+    last10: token.substring(token.length - 10),
+    hasNewline: token.includes('\n'),
+    hasSpace: token.includes(' '),
+    raw: JSON.stringify(token), // shows hidden characters
+  });
+});
+
+
 app.post('/humanize', (req, res) => {
   const { text } = req.body;
   if (!text || typeof text !== 'string' || !text.trim()) {
