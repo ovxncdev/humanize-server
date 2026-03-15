@@ -1,4 +1,4 @@
-// server.js — Browserless.io + Job queue, fresh page per job
+// server.js — Browserless.io + Job queue + screenshot debug
 const express = require('express');
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
@@ -30,9 +30,6 @@ setInterval(() => {
   }
 }, 60 * 1000);
 
-// ============================================
-// QUEUE
-// ============================================
 let isBusy = false;
 const queue = [];
 
@@ -50,7 +47,6 @@ function chunkText(text, maxWords = 190) {
   const chunks = [];
   let current = [];
   let count = 0;
-
   for (const sentence of sentences) {
     const words = sentence.trim().split(/\s+/).filter(Boolean);
     if (count + words.length > maxWords && current.length > 0) {
@@ -66,7 +62,7 @@ function chunkText(text, maxWords = 190) {
 }
 
 // ============================================
-// GET BROWSER — fresh connection each time
+// GET BROWSER
 // ============================================
 async function getBrowser() {
   if (IS_LOCAL) {
@@ -84,11 +80,10 @@ async function getBrowser() {
 }
 
 // ============================================
-// HUMANIZE ONE CHUNK — own browser session
+// HUMANIZE ONE CHUNK
 // ============================================
 async function humanizeChunk(text) {
   console.log('[Humanize] words:', text.split(/\s+/).length);
-
   const browser = await getBrowser();
   const page = await browser.newPage();
 
@@ -98,11 +93,14 @@ async function humanizeChunk(text) {
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     );
 
-    // Login if credentials provided
+    // Login
     if (EMAIL && PASSWORD) {
       console.log('[Humanize] Logging in...');
       await page.goto('https://www.humanizeai.pro/login', { waitUntil: 'domcontentloaded', timeout: 60000 });
       await new Promise(r => setTimeout(r, 2000));
+      const loginScreenshot = await page.screenshot({ encoding: 'base64' });
+      console.log('[DEBUG] Login page loaded, URL:', page.url());
+      console.log('[DEBUG] Login screenshot (first 50):', loginScreenshot.substring(0, 50));
 
       await page.waitForSelector('input[type="email"], input[name="email"]', { timeout: 10000 });
       await page.type('input[type="email"], input[name="email"]', EMAIL, { delay: 40 });
@@ -123,13 +121,13 @@ async function humanizeChunk(text) {
 
       await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 });
       await new Promise(r => setTimeout(r, 1500));
-      console.log('[Humanize] Logged in, URL:', page.url());
+      console.log('[Humanize] After login URL:', page.url());
     }
 
     // Navigate to humanizer
-    console.log('[Humanize] Loading humanizer page...');
     await page.goto('https://www.humanizeai.pro', { waitUntil: 'domcontentloaded', timeout: 60000 });
     await new Promise(r => setTimeout(r, 3000));
+    console.log('[Humanize] Main page URL:', page.url());
 
     // Dismiss cookie banner
     try {
@@ -144,9 +142,24 @@ async function humanizeChunk(text) {
       }
     } catch (e) {}
 
-    // Wait for result via response interception
+    // Log all API responses for debugging
+    page.on('response', async (response) => {
+      if (response.url().includes('/api/')) {
+        console.log('[DEBUG] API call:', response.url(), 'status:', response.status());
+      }
+    });
+
     const result = await new Promise(async (resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Timeout: no API response in 90s')), 90000);
+      const timeout = setTimeout(async () => {
+        // Take screenshot on timeout to see what's on screen
+        try {
+          const s = await page.screenshot({ encoding: 'base64' });
+          console.log('[DEBUG] Timeout screenshot saved, length:', s.length);
+          // Store for /last-screenshot endpoint
+          app.locals.lastScreenshot = s;
+        } catch(e) {}
+        reject(new Error('Timeout: no API response in 90s'));
+      }, 90000);
 
       const responseHandler = async (response) => {
         if (response.url().includes('/api/process')) {
@@ -162,10 +175,10 @@ async function humanizeChunk(text) {
             }
           } catch (e) {
             const raw = await response.text().catch(() => '');
-            console.log('[Humanize] Non-JSON response:', raw.substring(0, 150));
+            console.log('[Humanize] Non-JSON:', raw.substring(0, 150));
             clearTimeout(timeout);
             page.off('response', responseHandler);
-            reject(new Error('API returned non-JSON: ' + raw.substring(0, 80)));
+            reject(new Error('API returned non-JSON'));
           }
         }
       };
@@ -174,7 +187,9 @@ async function humanizeChunk(text) {
 
       try {
         await page.waitForSelector('textarea', { timeout: 15000 });
+        console.log('[Humanize] Textarea found ✅');
         await new Promise(r => setTimeout(r, 500));
+
         await page.evaluate((t) => {
           const textarea = document.querySelector('textarea');
           const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
@@ -191,7 +206,7 @@ async function humanizeChunk(text) {
         );
         const box = await btnHandle.asElement()?.boundingBox();
         if (box) {
-          console.log('[Humanize] Clicking button...');
+          console.log('[Humanize] Clicking button at:', JSON.stringify(box));
           await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
         } else {
           clearTimeout(timeout);
@@ -208,6 +223,7 @@ async function humanizeChunk(text) {
     return result;
   } finally {
     try {
+      await page.close();
       if (IS_LOCAL) await browser.close();
       else browser.disconnect();
     } catch (e) {}
@@ -223,21 +239,17 @@ async function processJob(jobId, text) {
   isBusy = true;
   job.status = 'processing';
   console.log(`[Job ${jobId}] Processing...`);
-
   try {
     const chunks = chunkText(text, 190);
     const results = [];
     let totalScore = 0;
     let scoredChunks = 0;
-
     for (let i = 0; i < chunks.length; i++) {
-      console.log(`[Job ${jobId}] Chunk ${i + 1}/${chunks.length}`);
       const result = await humanizeChunk(chunks[i]);
       results.push(result.text);
       if (result.score !== null) { totalScore += result.score; scoredChunks++; }
       if (i < chunks.length - 1) await new Promise(r => setTimeout(r, 2000));
     }
-
     job.status = 'done';
     job.result = {
       humanized: results.join(' '),
@@ -259,56 +271,64 @@ async function processJob(jobId, text) {
 // ============================================
 // ROUTES
 // ============================================
-app.get('/', (req, res) => res.json({ status: 'ok' }));
+app.get('/health', (req, res) => res.json({ status: 'ready', busy: isBusy, queued: queue.length }));
 
-app.get('/health', (req, res) => res.json({
-  status: 'ready',
-  busy: isBusy,
-  queued: queue.length,
-}));
+// Screenshot debug — shows what Browserless sees
+app.get('/screenshot', async (req, res) => {
+  try {
+    const puppeteerCore = require('puppeteer-core');
+    const b = await puppeteerCore.connect({
+      browserWSEndpoint: `wss://production-sfo.browserless.io/?token=${BROWSERLESS_TOKEN}`,
+    });
+    const p = await b.newPage();
+    await p.setViewport({ width: 1280, height: 800 });
+    await p.goto('https://www.humanizeai.pro', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await new Promise(r => setTimeout(r, 3000));
+    const img = await p.screenshot({ encoding: 'base64' });
+    await p.close();
+    b.disconnect();
+    res.send(`<img src="data:image/png;base64,${img}" style="max-width:100%">`);
+  } catch (e) {
+    res.json({ error: e.message });
+  }
+});
+
+// Last timeout screenshot
+app.get('/last-screenshot', (req, res) => {
+  const s = req.app.locals.lastScreenshot;
+  if (!s) return res.json({ error: 'No screenshot yet' });
+  res.send(`<img src="data:image/png;base64,${s}" style="max-width:100%">`);
+});
 
 app.post('/humanize', (req, res) => {
   const { text } = req.body;
   if (!text || typeof text !== 'string' || !text.trim()) {
     return res.status(400).json({ error: 'text field is required' });
   }
-
   const jobId = makeJobId();
   jobs.set(jobId, { id: jobId, status: 'pending', result: null, error: null, createdAt: Date.now() });
   queue.push({ jobId, text: text.trim() });
-
-  console.log(`[POST /humanize] Queued job ${jobId}`);
   processQueue();
-
   res.json({ jobId, status: 'pending', pollUrl: `/result/${jobId}` });
 });
 
 app.get('/result/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
-  if (!job) return res.status(404).json({ error: 'Job not found or expired (10min TTL)' });
-  if (job.status === 'pending' || job.status === 'processing') {
-    return res.json({ jobId: job.id, status: job.status });
-  }
-  if (job.status === 'error') {
-    return res.status(500).json({ jobId: job.id, status: 'error', error: job.error });
-  }
+  if (!job) return res.status(404).json({ error: 'Job not found or expired' });
+  if (job.status === 'pending' || job.status === 'processing') return res.json({ jobId: job.id, status: job.status });
+  if (job.status === 'error') return res.status(500).json({ jobId: job.id, status: 'error', error: job.error });
   return res.json({ jobId: job.id, status: 'done', ...job.result });
 });
 
 // ============================================
 // START
 // ============================================
-const server = app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`[Server] Port ${PORT} — Ready ✅`);
-
   setInterval(() => {
-    fetch(`http://localhost:${PORT}/health`)
-      .then(() => console.log('[KeepAlive] ok'))
-      .catch(e => console.warn('[KeepAlive] failed:', e.message));
+    fetch(`http://localhost:${PORT}/health`).catch(() => {});
   }, 4 * 60 * 1000);
 });
-
-server.setTimeout(10000);
 
 process.on('uncaughtException', err => console.error('[UNCAUGHT]', err.message, err.stack));
 process.on('unhandledRejection', reason => console.error('[UNHANDLED]', reason));
